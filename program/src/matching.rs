@@ -88,7 +88,7 @@ impl InnerNode {
 
     /// Returns the handle of the child that may contain the search key
     /// and 0 or 1 depending on which child it was.
-    fn walk_down(&self, search_key: i128) -> (NodeHandle, bool) {
+    pub fn walk_down(&self, search_key: i128) -> (NodeHandle, bool) {
         let crit_bit_mask = 1i128 << (127 - self.prefix_len);
         let crit_bit = (search_key & crit_bit_mask) != 0;
         (self.children[crit_bit as usize], crit_bit)
@@ -201,7 +201,7 @@ const_assert_eq!(size_of::<AnyNode>(), size_of::<InnerNode>());
 const_assert_eq!(size_of::<AnyNode>(), size_of::<LeafNode>());
 const_assert_eq!(size_of::<AnyNode>(), size_of::<FreeNode>());
 
-enum NodeRef<'a> {
+pub enum NodeRef<'a> {
     Inner(&'a InnerNode),
     Leaf(&'a LeafNode),
 }
@@ -226,7 +226,7 @@ impl AnyNode {
         }
     }
 
-    fn case(&self) -> Option<NodeRef> {
+    pub fn case(&self) -> Option<NodeRef> {
         match NodeTag::try_from(self.tag) {
             Ok(NodeTag::InnerNode) => Some(NodeRef::Inner(cast_ref(self))),
             Ok(NodeTag::LeafNode) => Some(NodeRef::Leaf(cast_ref(self))),
@@ -502,7 +502,7 @@ impl BookSide {
             _ => None,
         }
     }
-    fn get(&self, key: NodeHandle) -> Option<&AnyNode> {
+    pub fn get(&self, key: NodeHandle) -> Option<&AnyNode> {
         let node = &self.nodes[key as usize];
         let tag = NodeTag::try_from(node.tag);
         match tag {
@@ -532,7 +532,7 @@ impl BookSide {
     pub fn find_max(&self) -> Option<NodeHandle> {
         self.find_min_max(true)
     }
-    fn root(&self) -> Option<NodeHandle> {
+    pub fn root(&self) -> Option<NodeHandle> {
         if self.leaf_count == 0 {
             None
         } else {
