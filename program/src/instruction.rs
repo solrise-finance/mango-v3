@@ -55,9 +55,9 @@ pub enum MangoInstruction {
     /// 0. `[]` mango_group_ai - MangoGroup that this mango account is for
     /// 1. `[writable]` mango_account_ai - the mango account for this user
     /// 2. `[signer]` owner_ai - Solana account of owner of the mango account
-    /// 3. `[]` mango_cache_ai - MangoCache
-    /// 4. `[]` root_bank_ai - RootBank owned by MangoGroup
-    /// 5. `[writable]` node_bank_ai - NodeBank owned by RootBank
+    /// 3. `[writable]` mango_cache_ai - MangoCache
+    /// 4. `[writable]` root_bank_ai - RootBank of token being deposited
+    /// 5. `[writable]` node_bank_ai - NodeBank
     /// 6. `[writable]` vault_ai - TokenAccount owned by MangoGroup
     /// 7. `[]` token_prog_ai - acc pointed to by SPL token program id
     /// 8. `[writable]` owner_token_account_ai - TokenAccount owned by user which will be sending the funds
@@ -1030,6 +1030,33 @@ pub enum MangoInstruction {
         /// When the limit is reached, processing stops and the instruction succeeds.
         limit: u8,
     },
+
+    /// Cancels all the spot orders pending for a mango account
+    /// Accounts expected by this instruction (21)
+    /// 0. `[]` mango_group_ai
+    /// 1. `[]` mango_cache_ai
+    /// 2. `[writable]` mango_account_ai
+    /// 3. `[signer]` owner_ai
+    /// 4. `[]` base_root_bank_ai
+    /// 5. `[writable]` base_node_bank_ai
+    /// 6. `[writable]` base_vault_ai
+    /// 7. `[]` quote_root_bank_ai
+    /// 8. `[writable]` quote_node_bank_ai
+    /// 9. `[writable]` quote_vault_ai
+    /// 10. `[writable]` spot_market_ai
+    /// 11. `[writable]` bids_ai
+    /// 12. `[writable]` asks_ai
+    /// 13. `[writable]` open_orders_ai
+    /// 14. `[]` signer_ai
+    /// 15. `[writable]` dex_event_queue_ai
+    /// 16. `[writable]` dex_base_ai
+    /// 17. `[writable]` dex_quote_ai
+    /// 18. `[]` dex_signer_ai
+    /// 19. `[]` dex_prog_ai
+    /// 20. `[]` token_prog_ai
+    CancelAllSpotOrders {
+        limit: u8,
+    },
 }
 
 impl MangoInstruction {
@@ -1101,8 +1128,7 @@ impl MangoInstruction {
             7 => MangoInstruction::CachePrices,
             8 => MangoInstruction::CacheRootBanks,
             9 => {
-                let data_arr = array_ref![data, 0, 46];
-                let order = unpack_dex_new_order_v3(data_arr)?;
+                let order = unpack_dex_new_order_v3(data)?;
                 MangoInstruction::PlaceSpotOrder { order }
             }
             10 => MangoInstruction::AddOracle,
@@ -1315,8 +1341,7 @@ impl MangoInstruction {
 
             40 => MangoInstruction::ForceSettleQuotePositions,
             41 => {
-                let data_arr = array_ref![data, 0, 46];
-                let order = unpack_dex_new_order_v3(data_arr)?;
+                let order = unpack_dex_new_order_v3(data)?;
                 MangoInstruction::PlaceSpotOrder2 { order }
             }
 
@@ -1518,6 +1543,11 @@ impl MangoInstruction {
                     limit: u8::from_le_bytes(*limit),
                 }
             }
+            65 => {
+                let data_arr = array_ref![data, 0, 1];
+                let limit = data_arr[0];
+                MangoInstruction::CancelAllSpotOrders { limit }
+            }
             _ => {
                 return None;
             }
@@ -1553,9 +1583,10 @@ fn unpack_u64_opt(data: &[u8; 9]) -> Option<u64> {
     }
 }
 
-fn unpack_dex_new_order_v3(
-    data: &[u8; 46],
-) -> Option<serum_dex::instruction::NewOrderInstructionV3> {
+fn unpack_dex_new_order_v3(data: &[u8]) -> Option<serum_dex::instruction::NewOrderInstructionV3> {
+    let max_ts =
+        if data.len() == 54 { i64::from_le_bytes(*array_ref![data, 46, 8]) } else { i64::MAX };
+    let data = array_ref![data, 0, 46];
     let (
         &side_arr,
         &price_arr,
@@ -1595,6 +1626,7 @@ fn unpack_dex_new_order_v3(
         order_type,
         client_order_id,
         limit,
+        max_ts,
     })
 }
 
@@ -1738,6 +1770,7 @@ pub fn upgrade_mango_account_v0_v1(
     Ok(Instruction { program_id: *program_id, accounts, data })
 }
 
+/// Note: this instruction will not work if/when a new node bank is added
 pub fn deposit(
     program_id: &Pubkey,
     mango_group_pk: &Pubkey,
@@ -1755,8 +1788,8 @@ pub fn deposit(
         AccountMeta::new_readonly(*mango_group_pk, false),
         AccountMeta::new(*mango_account_pk, false),
         AccountMeta::new_readonly(*owner_pk, true),
-        AccountMeta::new_readonly(*mango_cache_pk, false),
-        AccountMeta::new_readonly(*root_bank_pk, false),
+        AccountMeta::new(*mango_cache_pk, false),
+        AccountMeta::new(*root_bank_pk, false),
         AccountMeta::new(*node_bank_pk, false),
         AccountMeta::new(*vault_pk, false),
         AccountMeta::new_readonly(spl_token::ID, false),
@@ -2078,6 +2111,58 @@ pub fn force_cancel_perp_orders(
     ];
     accounts.extend(open_orders_pks.iter().map(|pk| AccountMeta::new_readonly(*pk, false)));
     let instr = MangoInstruction::ForceCancelPerpOrders { limit };
+    let data = instr.pack();
+    Ok(Instruction { program_id: *program_id, accounts, data })
+}
+
+pub fn cancel_all_spot_orders(
+    program_id: &Pubkey,
+    mango_group_pk: &Pubkey,     // read
+    mango_cache_pk: &Pubkey,     // read
+    mango_account_pk: &Pubkey,   // write
+    owner_pk: &Pubkey,           // read, signer
+    base_root_bank_pk: &Pubkey,  // read
+    base_node_bank_pk: &Pubkey,  // write
+    base_vault_pk: &Pubkey,      // write
+    quote_root_bank_pk: &Pubkey, // read
+    quote_node_bank_pk: &Pubkey, // write
+    quote_vault_pk: &Pubkey,     // write
+    spot_market_pk: &Pubkey,     // write
+    bids_pk: &Pubkey,            // write
+    asks_pk: &Pubkey,            // write
+    open_orders_pk: &Pubkey,     // write
+    signer_pk: &Pubkey,          // read
+    dex_event_queue_pk: &Pubkey, // write
+    dex_base_pk: &Pubkey,        // write
+    dex_quote_pk: &Pubkey,       // write
+    dex_signer_pk: &Pubkey,      // read
+    dex_prog_pk: &Pubkey,        // read
+    limit: u8,
+) -> Result<Instruction, ProgramError> {
+    let accounts = vec![
+        AccountMeta::new_readonly(*mango_group_pk, false),
+        AccountMeta::new_readonly(*mango_cache_pk, false),
+        AccountMeta::new(*mango_account_pk, false),
+        AccountMeta::new_readonly(*owner_pk, true),
+        AccountMeta::new_readonly(*base_root_bank_pk, false),
+        AccountMeta::new(*base_node_bank_pk, false),
+        AccountMeta::new(*base_vault_pk, false),
+        AccountMeta::new_readonly(*quote_root_bank_pk, false),
+        AccountMeta::new(*quote_node_bank_pk, false),
+        AccountMeta::new(*quote_vault_pk, false),
+        AccountMeta::new(*spot_market_pk, false),
+        AccountMeta::new(*bids_pk, false),
+        AccountMeta::new(*asks_pk, false),
+        AccountMeta::new(*open_orders_pk, false),
+        AccountMeta::new_readonly(*signer_pk, false),
+        AccountMeta::new(*dex_event_queue_pk, false),
+        AccountMeta::new(*dex_base_pk, false),
+        AccountMeta::new(*dex_quote_pk, false),
+        AccountMeta::new_readonly(*dex_signer_pk, false),
+        AccountMeta::new_readonly(*dex_prog_pk, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+    ];
+    let instr = MangoInstruction::CancelAllSpotOrders { limit };
     let data = instr.pack();
     Ok(Instruction { program_id: *program_id, accounts, data })
 }
@@ -2534,6 +2619,72 @@ pub fn place_spot_order(
     }));
 
     let instr = MangoInstruction::PlaceSpotOrder { order };
+    let data = instr.pack();
+
+    Ok(Instruction { program_id: *program_id, accounts, data })
+}
+
+pub fn place_spot_order2(
+    program_id: &Pubkey,
+    mango_group_pk: &Pubkey,
+    mango_account_pk: &Pubkey,
+    owner_pk: &Pubkey,
+    mango_cache_pk: &Pubkey,
+    dex_prog_pk: &Pubkey,
+    spot_market_pk: &Pubkey,
+    bids_pk: &Pubkey,
+    asks_pk: &Pubkey,
+    dex_request_queue_pk: &Pubkey,
+    dex_event_queue_pk: &Pubkey,
+    dex_base_pk: &Pubkey,
+    dex_quote_pk: &Pubkey,
+    base_root_bank_pk: &Pubkey,
+    base_node_bank_pk: &Pubkey,
+    base_vault_pk: &Pubkey,
+    quote_root_bank_pk: &Pubkey,
+    quote_node_bank_pk: &Pubkey,
+    quote_vault_pk: &Pubkey,
+    signer_pk: &Pubkey,
+    dex_signer_pk: &Pubkey,
+    msrm_or_srm_vault_pk: &Pubkey,
+    open_orders_pks: &[Pubkey], // caller only need to pass in open_orders_pks that are in margin basket
+    affected_market_open_orders_index: usize, // used to determine which of the open orders accounts should be passed in write
+    order: serum_dex::instruction::NewOrderInstructionV3,
+) -> Result<Instruction, ProgramError> {
+    let mut accounts = vec![
+        AccountMeta::new_readonly(*mango_group_pk, false),
+        AccountMeta::new(*mango_account_pk, false),
+        AccountMeta::new_readonly(*owner_pk, true),
+        AccountMeta::new_readonly(*mango_cache_pk, false),
+        AccountMeta::new_readonly(*dex_prog_pk, false),
+        AccountMeta::new(*spot_market_pk, false),
+        AccountMeta::new(*bids_pk, false),
+        AccountMeta::new(*asks_pk, false),
+        AccountMeta::new(*dex_request_queue_pk, false),
+        AccountMeta::new(*dex_event_queue_pk, false),
+        AccountMeta::new(*dex_base_pk, false),
+        AccountMeta::new(*dex_quote_pk, false),
+        AccountMeta::new_readonly(*base_root_bank_pk, false),
+        AccountMeta::new(*base_node_bank_pk, false),
+        AccountMeta::new(*base_vault_pk, false),
+        AccountMeta::new_readonly(*quote_root_bank_pk, false),
+        AccountMeta::new(*quote_node_bank_pk, false),
+        AccountMeta::new(*quote_vault_pk, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+        AccountMeta::new_readonly(*signer_pk, false),
+        AccountMeta::new_readonly(*dex_signer_pk, false),
+        AccountMeta::new_readonly(*msrm_or_srm_vault_pk, false),
+    ];
+
+    accounts.extend(open_orders_pks.iter().enumerate().map(|(i, pk)| {
+        if i == affected_market_open_orders_index {
+            AccountMeta::new(*pk, false)
+        } else {
+            AccountMeta::new_readonly(*pk, false)
+        }
+    }));
+
+    let instr = MangoInstruction::PlaceSpotOrder2 { order };
     let data = instr.pack();
 
     Ok(Instruction { program_id: *program_id, accounts, data })
